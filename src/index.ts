@@ -21,7 +21,7 @@ const state: CanvasState = {
 
 const HOST = "127.0.0.1";
 const BASE_PORT = 19274;
-const BROWSER_CLIENT_HINT = "Open /excalidraw in a browser pane and keep that page connected before using screenshot or viewport tools.";
+const BROWSER_CLIENT_HINT = "Open the reported canvas URL in a browser pane and keep that page connected before using screenshot or viewport tools.";
 
 function getSourceDir() {
   const __filename = fileURLToPath(import.meta.url);

@@ -22,6 +22,7 @@
     "src/",
     "vendor/",
     "scripts/",
+    "assets/",
     "README.md"
   ],
   "scripts": {
@@ -30,6 +31,7 @@
     "check": "npm run typecheck && npm run smoke-test && npm pack --dry-run >/dev/null"
   },
   "pi": {
+    "image": "https://raw.githubusercontent.com/coctostan/pi-excalidraw/main/assets/readme/pi-excalidraw-overview.png",
     "extensions": [
       "./src/index.ts"
     ]
