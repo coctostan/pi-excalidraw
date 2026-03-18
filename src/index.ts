@@ -184,18 +184,22 @@ async function callApi(method: string, route: string, body?: unknown) {
 }
 
 function describeElementType(element: any): string {
+  if (isCompositionContainerElement(element)) {
+    return "composition panel";
+  }
+  if (isCompositionElementId(element?.id, "title")) {
+    return `composition title${element?.text ? ` — \"${String(element.text)}\"` : ""}`;
+  }
   if (element?.type === "ellipse") {
     const w = Number(element?.width ?? 0);
     const h = Number(element?.height ?? 0);
     if (Math.abs(w - h) <= 2) return "circle";
     return "ellipse";
   }
-
   if (element?.type === "rectangle") {
     if (element?.roundness) return "rounded rectangle";
     return "rectangle";
   }
-
   if (element?.type === "text") return `text${element?.text ? ` — \"${String(element.text)}\"` : ""}`;
   return String(element?.type ?? "unknown");
 }
@@ -488,6 +492,18 @@ const NODE_MIN_HARMONIZE_DELTA = 10;
 const NODE_MIN_ADAPTIVE_GAP = 56;
 const NODE_MAX_ADAPTIVE_GAP = 320;
 const CONNECTOR_INSET = 10;
+const DEFAULT_COMPOSITION_BACKGROUND = "#f8fafc";
+const DEFAULT_COMPOSITION_STROKE = "#94a3b8";
+const DEFAULT_COMPOSITION_TEXT = "#0f172a";
+const DEFAULT_COMPOSITION_DIVIDER = "#cbd5e1";
+const DEFAULT_COMPOSITION_TITLE_FONT_SIZE = 24;
+const DEFAULT_COMPOSITION_BODY_FONT_SIZE = 16;
+const DEFAULT_COMPOSITION_PADDING = 24;
+const DEFAULT_COMPOSITION_TITLE_GAP = 16;
+const DEFAULT_COMPOSITION_MIN_WIDTH = 260;
+const DEFAULT_COMPOSITION_MIN_HEIGHT = 180;
+const DEFAULT_COMPOSITION_OPACITY = 28;
+const COMPOSITION_ID_PREFIX = "composition";
 type NodeShape = "rectangle" | "rounded" | "ellipse" | "diamond";
 type TextBoxMetrics = {
   width: number;
@@ -514,6 +530,29 @@ type BuiltNode = {
     minHeight: number;
     widthLocked: boolean;
     heightLocked: boolean;
+  };
+};
+type BuiltComposition = {
+  containerElement: any;
+  titleElement: any;
+  dividerElement: any;
+  bodyElement?: any;
+  containerId: string;
+  titleId: string;
+  dividerId: string;
+  bodyId?: string;
+  groupId: string;
+  frame: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  contentArea: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
   };
 };
 function makeLocalId(prefix: string): string {
@@ -951,6 +990,471 @@ function computeEdgePoint(
   const signY = dy >= 0 ? 1 : -1;
   return { x: cx + signY * hh / tanA, y: cy + signY * hh };
 }
+function makeCompositionId(role: string) {
+  return makeLocalId(`${COMPOSITION_ID_PREFIX}_${role}`);
+}
+
+function isCompositionElementId(id: unknown, role?: string) {
+  if (typeof id !== "string") return false;
+  return role
+    ? id.startsWith(`${COMPOSITION_ID_PREFIX}_${role}_`)
+    : id.startsWith(`${COMPOSITION_ID_PREFIX}_`);
+}
+
+function isCompositionManagedElement(element: any) {
+  return isCompositionElementId(element?.id);
+}
+
+function isCompositionContainerElement(element: any) {
+  return isCompositionElementId(element?.id, "container");
+}
+
+function normalizeElementFrame(frame: { x: number; y: number; width: number; height: number }) {
+  let { x, y, width, height } = frame;
+  if (width < 0) {
+    x += width;
+    width = Math.abs(width);
+  }
+  if (height < 0) {
+    y += height;
+    height = Math.abs(height);
+  }
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    width: Number.isFinite(width) ? width : 0,
+    height: Number.isFinite(height) ? height : 0,
+  };
+}
+
+function getElementFrame(element: any) {
+  const x = Number(element?.x ?? 0);
+  const y = Number(element?.y ?? 0);
+  if (Array.isArray(element?.points) && (element?.type === "arrow" || element?.type === "line" || element?.type === "freedraw")) {
+    const absolutePoints = [[x, y]] as Array<[number, number]>;
+    for (const point of element.points) {
+      if (Array.isArray(point) && point.length >= 2) {
+        absolutePoints.push([x + Number(point[0] ?? 0), y + Number(point[1] ?? 0)]);
+      } else if (point && typeof point === "object") {
+        absolutePoints.push([x + Number((point as any).x ?? 0), y + Number((point as any).y ?? 0)]);
+      }
+    }
+    const xs = absolutePoints.map((point) => point[0]);
+    const ys = absolutePoints.map((point) => point[1]);
+    return normalizeElementFrame({
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+    });
+  }
+
+  return normalizeElementFrame({
+    x,
+    y,
+    width: Number(element?.width ?? 0),
+    height: Number(element?.height ?? 0),
+  });
+}
+
+function computeElementsBounds(elements: any[]) {
+  const frames = elements
+    .filter((element) => element && !element.isDeleted)
+    .map((element) => getElementFrame(element));
+  if (frames.length === 0) {
+    throw new Error("No visible elements were available to compute composition bounds.");
+  }
+
+  const minX = Math.min(...frames.map((frame) => frame.x));
+  const minY = Math.min(...frames.map((frame) => frame.y));
+  const maxX = Math.max(...frames.map((frame) => frame.x + frame.width));
+  const maxY = Math.max(...frames.map((frame) => frame.y + frame.height));
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(0, maxX - minX),
+    height: Math.max(0, maxY - minY),
+  };
+}
+
+function buildMeasuredTextElement(input: {
+  id?: string;
+  x: number;
+  y: number;
+  text: string;
+  fontSize: number;
+  textColor?: string;
+  maxWidth: number;
+  groupIds?: string[];
+  locked?: boolean;
+  opacity?: number;
+}) {
+  const text = normalizeLabelText(input.text);
+  const fontSize = Math.max(12, Math.round(input.fontSize));
+  const metrics = estimateTextBox(text, Math.max(120, Math.round(input.maxWidth)), fontSize);
+  return {
+    element: {
+      id: input.id ?? makeCompositionId("text"),
+      type: "text",
+      x: Number(input.x),
+      y: Number(input.y),
+      width: metrics.width,
+      height: metrics.height,
+      text,
+      fontSize,
+      fontFamily: 1,
+      strokeColor: input.textColor ?? DEFAULT_COMPOSITION_TEXT,
+      roughness: 0,
+      opacity: clamp(Number(input.opacity ?? 100), 0, 100),
+      groupIds: input.groupIds ?? [],
+      locked: input.locked ?? false,
+    },
+    metrics,
+  };
+}
+
+function buildDividerElement(input: {
+  id?: string;
+  x: number;
+  y: number;
+  width: number;
+  strokeColor?: string;
+  groupIds?: string[];
+  locked?: boolean;
+}) {
+  const usableWidth = Math.max(24, Math.round(input.width));
+  return {
+    id: input.id ?? makeCompositionId("divider"),
+    type: "line",
+    x: Number(input.x),
+    y: Number(input.y),
+    points: [[0, 0], [usableWidth, 0]],
+    strokeColor: input.strokeColor ?? DEFAULT_COMPOSITION_DIVIDER,
+    strokeWidth: 1.5,
+    strokeStyle: "solid",
+    roughness: 0,
+    opacity: 100,
+    groupIds: input.groupIds ?? [],
+    locked: input.locked ?? false,
+  };
+}
+
+function measureTitledCompositionLayout(input: {
+  title: string;
+  body?: string;
+  width: number;
+  padding: number;
+  titleGap: number;
+  titleFontSize: number;
+  bodyFontSize: number;
+  textColor?: string;
+  groupId: string;
+  locked: boolean;
+}) {
+  const usableWidth = Math.max(120, Math.round(input.width - input.padding * 2));
+  const title = buildMeasuredTextElement({
+    id: makeCompositionId("title"),
+    x: 0,
+    y: 0,
+    text: input.title,
+    fontSize: input.titleFontSize,
+    textColor: input.textColor,
+    maxWidth: usableWidth,
+    groupIds: [input.groupId],
+    locked: input.locked,
+  });
+  const body = input.body
+    ? buildMeasuredTextElement({
+      id: makeCompositionId("body"),
+      x: 0,
+      y: 0,
+      text: input.body,
+      fontSize: input.bodyFontSize,
+      textColor: input.textColor,
+      maxWidth: usableWidth,
+      groupIds: [input.groupId],
+      locked: input.locked,
+    })
+    : undefined;
+  const dividerY = input.padding + title.metrics.height + Math.round(input.titleGap / 2);
+  const contentTop = dividerY + Math.round(input.titleGap / 2);
+  return {
+    title,
+    body,
+    dividerY,
+    contentTop,
+    usableWidth,
+  };
+}
+
+function buildTitledComposition(input: {
+  title: string;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  body?: string;
+  shape?: "rectangle" | "rounded";
+  backgroundColor?: string;
+  strokeColor?: string;
+  textColor?: string;
+  dividerColor?: string;
+  opacity?: number;
+  padding?: number;
+  titleGap?: number;
+  titleFontSize?: number;
+  bodyFontSize?: number;
+  locked?: boolean;
+}): BuiltComposition {
+  const groupId = makeCompositionId("group");
+  const padding = Math.max(12, roundDimension(Number(input.padding ?? DEFAULT_COMPOSITION_PADDING)));
+  const titleGap = Math.max(8, roundDimension(Number(input.titleGap ?? DEFAULT_COMPOSITION_TITLE_GAP)));
+  const titleFontSize = Math.max(16, Math.round(Number(input.titleFontSize ?? DEFAULT_COMPOSITION_TITLE_FONT_SIZE)));
+  const bodyFontSize = Math.max(12, Math.round(Number(input.bodyFontSize ?? DEFAULT_COMPOSITION_BODY_FONT_SIZE)));
+  const requestedWidth = Number(input.width);
+  const requestedHeight = Number(input.height);
+  const hasWidth = Number.isFinite(requestedWidth);
+  const hasHeight = Number.isFinite(requestedHeight);
+  let panelWidth = roundDimension(Math.max(DEFAULT_COMPOSITION_MIN_WIDTH, hasWidth ? requestedWidth : DEFAULT_COMPOSITION_MIN_WIDTH));
+  let measured = measureTitledCompositionLayout({
+    title: input.title,
+    body: input.body,
+    width: panelWidth,
+    padding,
+    titleGap,
+    titleFontSize,
+    bodyFontSize,
+    textColor: input.textColor,
+    groupId,
+    locked: input.locked ?? true,
+  });
+  panelWidth = roundDimension(Math.max(
+    panelWidth,
+    measured.title.metrics.width + padding * 2,
+    measured.body ? measured.body.metrics.width + padding * 2 : 0,
+  ));
+  measured = measureTitledCompositionLayout({
+    title: input.title,
+    body: input.body,
+    width: panelWidth,
+    padding,
+    titleGap,
+    titleFontSize,
+    bodyFontSize,
+    textColor: input.textColor,
+    groupId,
+    locked: input.locked ?? true,
+  });
+  const minimumHeight = measured.contentTop + (measured.body ? measured.body.metrics.height : 0) + padding;
+  const panelHeight = roundDimension(Math.max(DEFAULT_COMPOSITION_MIN_HEIGHT, hasHeight ? requestedHeight : DEFAULT_COMPOSITION_MIN_HEIGHT, minimumHeight));
+  const shape = input.shape === "rectangle" ? "rectangle" : "rounded";
+  const containerId = makeCompositionId("container");
+  const dividerId = makeCompositionId("divider");
+  const locked = input.locked ?? true;
+  const frame = {
+    x: Number(input.x),
+    y: Number(input.y),
+    width: panelWidth,
+    height: panelHeight,
+  };
+  const containerElement: any = {
+    id: containerId,
+    type: "rectangle",
+    x: frame.x,
+    y: frame.y,
+    width: frame.width,
+    height: frame.height,
+    strokeColor: input.strokeColor ?? DEFAULT_COMPOSITION_STROKE,
+    backgroundColor: input.backgroundColor ?? DEFAULT_COMPOSITION_BACKGROUND,
+    strokeWidth: 2,
+    fillStyle: "solid",
+    roughness: 0,
+    opacity: clamp(Number(input.opacity ?? DEFAULT_COMPOSITION_OPACITY), 0, 100),
+    groupIds: [groupId],
+    locked,
+  };
+  if (shape === "rounded") {
+    containerElement.roundness = { type: 3 };
+  }
+  measured.title.element.id = makeCompositionId("title");
+  measured.title.element.x = frame.x + padding;
+  measured.title.element.y = frame.y + padding;
+  const dividerElement = buildDividerElement({
+    id: dividerId,
+    x: frame.x + padding,
+    y: frame.y + measured.dividerY,
+    width: Math.max(24, frame.width - padding * 2),
+    strokeColor: input.dividerColor ?? DEFAULT_COMPOSITION_DIVIDER,
+    groupIds: [groupId],
+    locked,
+  });
+  if (measured.body) {
+    measured.body.element.id = makeCompositionId("body");
+    measured.body.element.x = frame.x + padding;
+    measured.body.element.y = frame.y + measured.contentTop;
+  }
+  return {
+    containerElement,
+    titleElement: measured.title.element,
+    dividerElement,
+    bodyElement: measured.body?.element,
+    containerId,
+    titleId: measured.title.element.id,
+    dividerId,
+    bodyId: measured.body?.element?.id,
+    groupId,
+    frame,
+    contentArea: {
+      x: frame.x + padding,
+      y: frame.y + measured.contentTop,
+      width: Math.max(24, frame.width - padding * 2),
+      height: Math.max(24, frame.height - measured.contentTop - padding),
+    },
+  };
+}
+
+function buildWrappedTitledComposition(input: {
+  title: string;
+  elements: any[];
+  shape?: "rectangle" | "rounded";
+  backgroundColor?: string;
+  strokeColor?: string;
+  textColor?: string;
+  dividerColor?: string;
+  opacity?: number;
+  padding?: number;
+  titleGap?: number;
+  titleFontSize?: number;
+  locked?: boolean;
+}) {
+  const elements = input.elements.filter((element) => element && !element.isDeleted && !isCompositionManagedElement(element));
+  if (elements.length === 0) {
+    throw new Error("Wrap helper requires at least one non-composition element id.");
+  }
+  const bounds = computeElementsBounds(elements);
+  const padding = Math.max(12, roundDimension(Number(input.padding ?? DEFAULT_COMPOSITION_PADDING)));
+  const titleGap = Math.max(8, roundDimension(Number(input.titleGap ?? DEFAULT_COMPOSITION_TITLE_GAP)));
+  const titleFontSize = Math.max(16, Math.round(Number(input.titleFontSize ?? DEFAULT_COMPOSITION_TITLE_FONT_SIZE)));
+  let panelWidth = roundDimension(Math.max(DEFAULT_COMPOSITION_MIN_WIDTH, bounds.width + padding * 2));
+  let measured = measureTitledCompositionLayout({
+    title: input.title,
+    width: panelWidth,
+    padding,
+    titleGap,
+    titleFontSize,
+    bodyFontSize: DEFAULT_COMPOSITION_BODY_FONT_SIZE,
+    textColor: input.textColor,
+    groupId: makeCompositionId("measure_group"),
+    locked: input.locked ?? true,
+  });
+  panelWidth = roundDimension(Math.max(panelWidth, measured.title.metrics.width + padding * 2));
+  measured = measureTitledCompositionLayout({
+    title: input.title,
+    width: panelWidth,
+    padding,
+    titleGap,
+    titleFontSize,
+    bodyFontSize: DEFAULT_COMPOSITION_BODY_FONT_SIZE,
+    textColor: input.textColor,
+    groupId: makeCompositionId("measure_group"),
+    locked: input.locked ?? true,
+  });
+  return buildTitledComposition({
+    title: input.title,
+    x: roundDimension(bounds.x - padding),
+    y: roundDimension(bounds.y - measured.contentTop),
+    width: panelWidth,
+    height: roundDimension(measured.contentTop + bounds.height + padding),
+    shape: input.shape,
+    backgroundColor: input.backgroundColor,
+    strokeColor: input.strokeColor,
+    textColor: input.textColor,
+    dividerColor: input.dividerColor,
+    opacity: input.opacity,
+    padding,
+    titleGap,
+    titleFontSize,
+    locked: input.locked,
+  });
+}
+
+function frameContainsFrame(outer: { x: number; y: number; width: number; height: number }, inner: { x: number; y: number; width: number; height: number }) {
+  return inner.x >= outer.x
+    && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height;
+}
+
+function estimateCompositionPadding(composition: { containerElement: any; titleElement?: any; dividerElement?: any }) {
+  const containerFrame = getElementFrame(composition.containerElement);
+  const candidates: number[] = [];
+  if (composition.titleElement) {
+    const titleFrame = getElementFrame(composition.titleElement);
+    candidates.push(titleFrame.x - containerFrame.x);
+  }
+  if (composition.dividerElement) {
+    const dividerFrame = getElementFrame(composition.dividerElement);
+    candidates.push(dividerFrame.x - containerFrame.x);
+    candidates.push(containerFrame.x + containerFrame.width - (dividerFrame.x + dividerFrame.width));
+  }
+  const finiteCandidates = candidates.filter((value) => Number.isFinite(value) && value >= 12);
+  return Math.max(12, roundDimension(finiteCandidates.length > 0 ? Math.min(...finiteCandidates) : DEFAULT_COMPOSITION_PADDING));
+}
+
+function getCompositionContentBounds(composition: { containerElement: any; dividerElement?: any }) {
+  const containerFrame = getElementFrame(composition.containerElement);
+  if (!composition.dividerElement) {
+    return containerFrame;
+  }
+  const dividerFrame = getElementFrame(composition.dividerElement);
+  return normalizeElementFrame({
+    x: containerFrame.x,
+    y: dividerFrame.y,
+    width: containerFrame.width,
+    height: containerFrame.y + containerFrame.height - dividerFrame.y,
+  });
+}
+
+function collectCompositionStructures(elements: any[]): Array<{
+  groupId: string;
+  containerElement: any;
+  titleElement?: any;
+  dividerElement?: any;
+  bodyElement?: any;
+}> {
+  const byGroupId = new Map<string, {
+    groupId: string;
+    containerElement?: any;
+    titleElement?: any;
+    dividerElement?: any;
+    bodyElement?: any;
+  }>();
+  for (const element of elements) {
+    if (!isCompositionManagedElement(element)) continue;
+    const groupId = Array.isArray(element?.groupIds) && typeof element.groupIds[0] === "string"
+      ? element.groupIds[0]
+      : String(element.id);
+    const entry = byGroupId.get(groupId) ?? { groupId };
+    if (isCompositionContainerElement(element)) {
+      entry.containerElement = element;
+    } else if (isCompositionElementId(element?.id, "title")) {
+      entry.titleElement = element;
+    } else if (isCompositionElementId(element?.id, "divider")) {
+      entry.dividerElement = element;
+    } else if (isCompositionElementId(element?.id, "body")) {
+      entry.bodyElement = element;
+    }
+    byGroupId.set(groupId, entry);
+  }
+
+  return Array.from(byGroupId.values()).filter((entry): entry is {
+    groupId: string;
+    containerElement: any;
+    titleElement?: any;
+    dividerElement?: any;
+    bodyElement?: any;
+  } => Boolean(entry.containerElement));
+}
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("excalidraw", {
@@ -1089,6 +1593,138 @@ export default function (pi: ExtensionAPI) {
     },
   });
   pi.registerTool({
+    name: "excalidraw_create_titled_panel",
+    label: "Create Titled Composition Panel",
+    description: "High-level composition helper: create a titled section/panel region with coordinated container, title, and divider elements in one call.",
+    parameters: Type.Object({
+      title: Type.String({ description: "Panel or section title" }),
+      x: Type.Number(),
+      y: Type.Number(),
+      width: Type.Optional(Type.Number({ description: "Optional fixed panel width. Omit for the default composition width." })),
+      height: Type.Optional(Type.Number({ description: "Optional fixed panel height. Omit for the default composition height." })),
+      body: Type.Optional(Type.String({ description: "Optional supporting body text to place inside the panel." })),
+      shape: Type.Optional(Type.Union([Type.Literal("rectangle"), Type.Literal("rounded")], { default: "rounded" })),
+      backgroundColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_BACKGROUND })),
+      strokeColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_STROKE })),
+      textColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_TEXT })),
+      dividerColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_DIVIDER })),
+      opacity: Type.Optional(Type.Number({ default: DEFAULT_COMPOSITION_OPACITY })),
+      padding: Type.Optional(Type.Number({ default: DEFAULT_COMPOSITION_PADDING })),
+      titleFontSize: Type.Optional(Type.Number({ default: DEFAULT_COMPOSITION_TITLE_FONT_SIZE })),
+    }),
+    async execute(_id, params: any) {
+      const composition = buildTitledComposition({
+        title: params.title,
+        x: params.x,
+        y: params.y,
+        width: params.width,
+        height: params.height,
+        body: params.body,
+        shape: params.shape,
+        backgroundColor: params.backgroundColor,
+        strokeColor: params.strokeColor,
+        textColor: params.textColor,
+        dividerColor: params.dividerColor,
+        opacity: params.opacity,
+        padding: params.padding,
+        titleFontSize: params.titleFontSize,
+      });
+      const elements = [
+        composition.containerElement,
+        composition.titleElement,
+        composition.dividerElement,
+        ...(composition.bodyElement ? [composition.bodyElement] : []),
+      ];
+      const result = await createElementsBatch(elements);
+      return {
+        content: [{
+          type: "text",
+          text: `Created titled composition panel "${params.title}" with ${elements.length} coordinated element(s). Next: place nodes inside it or use excalidraw_wrap_in_titled_panel on existing content, then run excalidraw_layout_diagram, excalidraw_focus_canvas, and excalidraw_capture_screenshot.`,
+        }],
+        details: {
+          ...result,
+          elementIds: elements.map((element) => element.id),
+          containerId: composition.containerId,
+          titleId: composition.titleId,
+          dividerId: composition.dividerId,
+          bodyId: composition.bodyId,
+          frame: composition.frame,
+          contentArea: composition.contentArea,
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "excalidraw_wrap_in_titled_panel",
+    label: "Wrap Elements in Titled Panel",
+    description: "Composition helper: compute a safe titled panel around existing elements so the LLM does not need to do manual box math.",
+    parameters: Type.Object({
+      title: Type.String({ description: "Panel or section title" }),
+      elementIds: Type.Array(Type.String(), { minItems: 1 }),
+      shape: Type.Optional(Type.Union([Type.Literal("rectangle"), Type.Literal("rounded")], { default: "rounded" })),
+      backgroundColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_BACKGROUND })),
+      strokeColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_STROKE })),
+      textColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_TEXT })),
+      dividerColor: Type.Optional(Type.String({ default: DEFAULT_COMPOSITION_DIVIDER })),
+      opacity: Type.Optional(Type.Number({ default: DEFAULT_COMPOSITION_OPACITY })),
+      padding: Type.Optional(Type.Number({ default: DEFAULT_COMPOSITION_PADDING })),
+      titleFontSize: Type.Optional(Type.Number({ default: DEFAULT_COMPOSITION_TITLE_FONT_SIZE })),
+    }),
+    async execute(_id, params: any) {
+      const current = await callApi("GET", "/api/elements");
+      const allElements = Array.isArray(current?.elements) ? current.elements : [];
+      const requestedIds = Array.isArray(params.elementIds) ? params.elementIds.map((id: any) => String(id)) : [];
+      const targetById = new Map<string, any>();
+      for (const element of allElements) {
+        if (typeof element?.id === "string") {
+          targetById.set(element.id, element);
+        }
+      }
+      const missingIds = requestedIds.filter((id: string) => !targetById.has(id));
+      if (missingIds.length > 0) {
+        throw new Error(`Wrap helper could not find ${missingIds.length} requested element(s): ${missingIds.join(", ")}`);
+      }
+      const targetElements = requestedIds
+        .map((id: string) => targetById.get(id))
+        .filter(Boolean);
+      const composition = buildWrappedTitledComposition({
+        title: params.title,
+        elements: targetElements,
+        shape: params.shape,
+        backgroundColor: params.backgroundColor,
+        strokeColor: params.strokeColor,
+        textColor: params.textColor,
+        dividerColor: params.dividerColor,
+        opacity: params.opacity,
+        padding: params.padding,
+        titleFontSize: params.titleFontSize,
+      });
+      const elements = [
+        composition.containerElement,
+        composition.titleElement,
+        composition.dividerElement,
+      ];
+      const result = await createElementsBatch(elements);
+      return {
+        content: [{
+          type: "text",
+          text: `Wrapped ${requestedIds.length} existing element(s) in titled panel "${params.title}" without manual coordinate math. Next: run excalidraw_layout_diagram for node polish, then excalidraw_focus_canvas and excalidraw_capture_screenshot to validate the grouped composition.`,
+        }],
+        details: {
+          ...result,
+          wrappedIds: requestedIds,
+          elementIds: elements.map((element) => element.id),
+          containerId: composition.containerId,
+          titleId: composition.titleId,
+          dividerId: composition.dividerId,
+          frame: composition.frame,
+          contentArea: composition.contentArea,
+        },
+      };
+    },
+  });
+  pi.registerTool({
     name: "excalidraw_create_connected_nodes",
     label: "Create Connected Nodes",
     description: "High-level diagram generator: create multiple labeled nodes plus connector arrows with cleaner default sizing, spacing, and routing in one operation.",
@@ -1219,7 +1855,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "excalidraw_layout_diagram",
     label: "Layout Diagram",
-    description: "Layout + polish helper: rearrange node-like elements into deterministic horizontal, vertical, or centered-flow layouts with cleaner spacing and connector refresh behavior.",
+    description: "Layout + polish helper: rearrange node-like elements into deterministic horizontal, vertical, or centered-flow layouts with cleaner spacing and connector refresh behavior, while skipping decorative composition containers by default.",
     parameters: Type.Object({
       mode: Type.Optional(Type.Union([
         Type.Literal("horizontal"),
@@ -1238,17 +1874,19 @@ export default function (pi: ExtensionAPI) {
       const laneOffset = Math.max(20, Number(params.laneOffset ?? 72));
       const current = await callApi("GET", "/api/elements");
       const allElements = Array.isArray(current?.elements) ? current.elements : [];
+      const compositions = collectCompositionStructures(allElements);
       const nodeTypes = new Set(["rectangle", "ellipse", "diamond"]);
       const selectedIds = Array.isArray(params.elementIds) && params.elementIds.length > 0
         ? new Set(params.elementIds.map((id: any) => String(id)))
         : null;
       let nodes = allElements.filter((element: any) => {
         if (!nodeTypes.has(String(element?.type ?? ""))) return false;
+        if (isCompositionContainerElement(element)) return false;
         if (!selectedIds) return true;
         return selectedIds.has(String(element?.id ?? ""));
       });
       if (nodes.length < 2) {
-        throw new Error("Layout requires at least 2 node-like elements (rectangle/ellipse/diamond). Provide elementIds if needed.");
+        throw new Error("Layout requires at least 2 node-like elements (rectangle/ellipse/diamond). Decorative composition containers are skipped by default; provide elementIds for the nodes you want to arrange if needed.");
       }
       nodes = [...nodes].sort((a: any, b: any) => {
         if (mode === "vertical") {
@@ -1324,6 +1962,16 @@ export default function (pi: ExtensionAPI) {
           height: node.height,
         });
       }
+      const trackedCompositions = compositions.map((composition) => {
+        const contentBounds = getCompositionContentBounds(composition);
+        const memberNodeIds = layoutNodes
+          .filter((node) => frameContainsFrame(contentBounds, getElementFrame(node.element)))
+          .map((node) => node.id);
+        return {
+          composition,
+          memberNodeIds,
+        };
+      }).filter((entry) => entry.memberNodeIds.length > 0);
       const updates: Array<{ id: string; updates: any }> = [];
       let resizedNodes = 0;
       for (const node of layoutNodes) {
@@ -1400,6 +2048,67 @@ export default function (pi: ExtensionAPI) {
         });
         movedConnectors++;
       }
+      let adjustedCompositions = 0;
+      for (const entry of trackedCompositions) {
+        const { composition, memberNodeIds } = entry;
+        const memberElements = memberNodeIds.map((id: string) => {
+          const original = elementById.get(id);
+          const frame = targetFrames.get(id);
+          if (!original || !frame) return null;
+          return {
+            ...original,
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+          };
+        }).filter(Boolean);
+        if (memberElements.length === 0 || !composition.containerElement || !composition.titleElement) continue;
+
+        const rebuilt = buildWrappedTitledComposition({
+          title: String(composition.titleElement.text ?? "Section"),
+          elements: memberElements,
+          shape: composition.containerElement.roundness ? "rounded" : "rectangle",
+          backgroundColor: composition.containerElement.backgroundColor,
+          strokeColor: composition.containerElement.strokeColor,
+          textColor: composition.titleElement.strokeColor,
+          dividerColor: composition.dividerElement?.strokeColor,
+          opacity: composition.containerElement.opacity,
+          padding: estimateCompositionPadding(composition),
+          titleFontSize: Number(composition.titleElement.fontSize ?? DEFAULT_COMPOSITION_TITLE_FONT_SIZE),
+          locked: Boolean(composition.containerElement.locked ?? true),
+        });
+
+        updates.push({
+          id: composition.containerElement.id,
+          updates: {
+            x: rebuilt.containerElement.x,
+            y: rebuilt.containerElement.y,
+            width: rebuilt.containerElement.width,
+            height: rebuilt.containerElement.height,
+          },
+        });
+        updates.push({
+          id: composition.titleElement.id,
+          updates: {
+            x: rebuilt.titleElement.x,
+            y: rebuilt.titleElement.y,
+            width: rebuilt.titleElement.width,
+            height: rebuilt.titleElement.height,
+          },
+        });
+        if (composition.dividerElement?.id) {
+          updates.push({
+            id: composition.dividerElement.id,
+            updates: {
+              x: rebuilt.dividerElement.x,
+              y: rebuilt.dividerElement.y,
+              points: rebuilt.dividerElement.points,
+            },
+          });
+        }
+        adjustedCompositions++;
+      }
       const latestById = new Map<string, any>();
       for (const update of updates) {
         latestById.set(update.id, update.updates);
@@ -1410,7 +2119,7 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `Applied ${mode} layout/polish to ${layoutNodes.length} node(s), softly resized ${resizedNodes}, re-centered ${movedLabels} grouped label(s), and refreshed ${movedConnectors} connector(s). Next: run excalidraw_focus_canvas, then excalidraw_capture_screenshot as the final visual quality check.`,
+          text: `Applied ${mode} layout/polish to ${layoutNodes.length} node(s), softly resized ${resizedNodes}, re-centered ${movedLabels} grouped label(s), refreshed ${movedConnectors} connector(s), and re-fit ${adjustedCompositions} titled composition wrapper(s). Next: run excalidraw_focus_canvas, then excalidraw_capture_screenshot as the final visual quality check.`,
         }],
         details: {
           mode,
@@ -1420,6 +2129,7 @@ export default function (pi: ExtensionAPI) {
           resizedNodes,
           movedLabels,
           movedConnectors,
+          adjustedCompositions,
           updatedIds: Array.from(latestById.keys()),
         },
       };
