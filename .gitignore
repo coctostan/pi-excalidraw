@@ -10,3 +10,6 @@ node_modules/
 # keep the project-local development shim checked in
 !.pi/extensions/
 !.pi/extensions/pi-excalidraw/
+
+# local runtime logs
+vendor/mcp_excalidraw/excalidraw.log
