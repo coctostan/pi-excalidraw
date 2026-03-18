@@ -884,33 +884,39 @@ function computeSequentialNodeTargets(
 ) {
   const targetPositions = new Map<string, { x: number; y: number }>();
   if (nodes.length === 0) return targetPositions;
-  const maxWidth = Math.max(...nodes.map((node) => Number(node.width ?? DEFAULT_NODE_WIDTH)));
-  const maxHeight = Math.max(...nodes.map((node) => Number(node.height ?? DEFAULT_NODE_HEIGHT)));
+  const widths = nodes.map((node) => Number(node.width ?? DEFAULT_NODE_WIDTH));
+  const heights = nodes.map((node) => Number(node.height ?? DEFAULT_NODE_HEIGHT));
+  const maxWidth = Math.max(...widths);
+  const maxHeight = Math.max(...heights);
+  const baselineWidth = Math.max(DEFAULT_NODE_WIDTH * 0.75, median(widths));
+  const baselineHeight = Math.max(DEFAULT_NODE_HEIGHT * 0.75, median(heights));
+  const effectiveLaneOffset = mode === "centered-flow"
+    ? Math.max(laneOffset, roundDimension(maxHeight * 0.38))
+    : laneOffset;
   let cursorX = startX;
   let cursorY = startY;
-
   nodes.forEach((node, index) => {
-    const width = Number(node.width ?? DEFAULT_NODE_WIDTH);
-    const height = Number(node.height ?? DEFAULT_NODE_HEIGHT);
+    const width = widths[index];
+    const height = heights[index];
     let x = startX;
     let y = startY;
     if (index > 0) {
-      const previous = nodes[index - 1];
-      const previousWidth = Number(previous?.width ?? DEFAULT_NODE_WIDTH);
-      const previousHeight = Number(previous?.height ?? DEFAULT_NODE_HEIGHT);
+      const previousWidth = widths[index - 1];
+      const previousHeight = heights[index - 1];
       if (mode === "vertical") {
-        cursorY += previousHeight + resolveAdaptiveGap(gap, previousHeight, height, DEFAULT_NODE_HEIGHT);
+        cursorY += previousHeight + resolveAdaptiveGap(gap, previousHeight, height, baselineHeight);
       } else {
-        cursorX += previousWidth + resolveAdaptiveGap(gap, previousWidth, width, DEFAULT_NODE_WIDTH);
+        cursorX += previousWidth + resolveAdaptiveGap(gap, previousWidth, width, baselineWidth);
       }
     }
+
     if (mode === "vertical") {
       x = startX + (maxWidth - width) / 2;
       y = cursorY;
     } else if (mode === "centered-flow") {
       const laneDirection = index === 0 ? 0 : (index % 2 === 0 ? 1 : -1);
       x = cursorX;
-      y = startY + (maxHeight - height) / 2 + laneDirection * laneOffset;
+      y = startY + (maxHeight - height) / 2 + laneDirection * effectiveLaneOffset;
     } else {
       x = cursorX;
       y = startY + (maxHeight - height) / 2;
@@ -919,29 +925,33 @@ function computeSequentialNodeTargets(
   });
   return targetPositions;
 }
-
 function buildConnectorPoints(start: { x: number; y: number }, end: { x: number; y: number }, preferElbowed: boolean) {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
-
   if (!preferElbowed || Math.abs(dx) < 36 || Math.abs(dy) < 36) {
     return {
       points: [[0, 0], [dx, dy]],
       elbowed: false,
     };
   }
-
   if (Math.abs(dx) >= Math.abs(dy)) {
-    const midX = dx / 2;
+    const bendX = Math.sign(dx || 1) * clamp(
+      Math.round(Math.abs(dx) * 0.35),
+      36,
+      Math.max(36, Math.round(Math.abs(dx) - 36)),
+    );
     return {
-      points: [[0, 0], [midX, 0], [midX, dy], [dx, dy]],
+      points: [[0, 0], [bendX, 0], [bendX, dy], [dx, dy]],
       elbowed: true,
     };
   }
-
-  const midY = dy / 2;
+  const bendY = Math.sign(dy || 1) * clamp(
+    Math.round(Math.abs(dy) * 0.35),
+    36,
+    Math.max(36, Math.round(Math.abs(dy) - 36)),
+  );
   return {
-    points: [[0, 0], [0, midY], [dx, midY], [dx, dy]],
+    points: [[0, 0], [0, bendY], [dx, bendY], [dx, dy]],
     elbowed: true,
   };
 }
@@ -1376,6 +1386,47 @@ function buildWrappedTitledComposition(input: {
     titleFontSize,
     locked: input.locked,
   });
+}
+
+function translateBuiltComposition(composition: BuiltComposition, dx: number, dy: number): BuiltComposition {
+  return {
+    ...composition,
+    containerElement: {
+      ...composition.containerElement,
+      x: Number(composition.containerElement.x ?? 0) + dx,
+      y: Number(composition.containerElement.y ?? 0) + dy,
+    },
+    titleElement: {
+      ...composition.titleElement,
+      x: Number(composition.titleElement.x ?? 0) + dx,
+      y: Number(composition.titleElement.y ?? 0) + dy,
+    },
+    dividerElement: {
+      ...composition.dividerElement,
+      x: Number(composition.dividerElement.x ?? 0) + dx,
+      y: Number(composition.dividerElement.y ?? 0) + dy,
+      points: Array.isArray(composition.dividerElement.points)
+        ? composition.dividerElement.points.map((point: any) => (Array.isArray(point) ? [...point] : point))
+        : composition.dividerElement.points,
+    },
+    bodyElement: composition.bodyElement
+      ? {
+        ...composition.bodyElement,
+        x: Number(composition.bodyElement.x ?? 0) + dx,
+        y: Number(composition.bodyElement.y ?? 0) + dy,
+      }
+      : undefined,
+    frame: {
+      ...composition.frame,
+      x: composition.frame.x + dx,
+      y: composition.frame.y + dy,
+    },
+    contentArea: {
+      ...composition.contentArea,
+      x: composition.contentArea.x + dx,
+      y: composition.contentArea.y + dy,
+    },
+  };
 }
 
 function frameContainsFrame(outer: { x: number; y: number; width: number; height: number }, inner: { x: number; y: number; width: number; height: number }) {
@@ -1937,31 +1988,6 @@ export default function (pi: ExtensionAPI) {
       });
       harmonizeNodeDimensions(layoutNodes);
 
-      const minX = Math.min(...layoutNodes.map((node: { element: any }) => Number(node.element?.x ?? 0)));
-      const minY = Math.min(...layoutNodes.map((node: { element: any }) => Number(node.element?.y ?? 0)));
-      const parsedStartX = Number(params.startX);
-      const parsedStartY = Number(params.startY);
-      const startX = Number.isFinite(parsedStartX) ? parsedStartX : minX;
-      const startY = Number.isFinite(parsedStartY) ? parsedStartY : minY;
-      const targetPositions = computeSequentialNodeTargets(
-        layoutNodes.map((node: { id: string; width: number; height: number }) => ({ id: node.id, width: node.width, height: node.height })),
-        mode,
-        startX,
-        startY,
-        gap,
-        laneOffset,
-      );
-      const targetFrames = new Map<string, { x: number; y: number; width: number; height: number }>();
-      for (const node of layoutNodes) {
-        const target = targetPositions.get(node.id);
-        if (!target) continue;
-        targetFrames.set(node.id, {
-          x: target.x,
-          y: target.y,
-          width: node.width,
-          height: node.height,
-        });
-      }
       const trackedCompositions = compositions.map((composition) => {
         const contentBounds = getCompositionContentBounds(composition);
         const memberNodeIds = layoutNodes
@@ -1972,6 +1998,140 @@ export default function (pi: ExtensionAPI) {
           memberNodeIds,
         };
       }).filter((entry) => entry.memberNodeIds.length > 0);
+      const claimedNodeIds = new Set<string>();
+      const clusterLayouts: Array<{
+        id: string;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        nodeFrames: Map<string, { x: number; y: number; width: number; height: number }>;
+        composition?: {
+          original: any;
+          rebuilt: BuiltComposition;
+        };
+      }> = [];
+      for (const entry of trackedCompositions) {
+        const memberNodes = layoutNodes.filter((node) => entry.memberNodeIds.includes(node.id) && !claimedNodeIds.has(node.id));
+        if (memberNodes.length === 0 || !entry.composition.containerElement || !entry.composition.titleElement) continue;
+        memberNodes.forEach((node) => claimedNodeIds.add(node.id));
+        const compositionFrame = getElementFrame(entry.composition.containerElement);
+        const internalTargets = computeSequentialNodeTargets(
+          memberNodes.map((node) => ({ id: node.id, width: node.width, height: node.height })),
+          mode,
+          0,
+          0,
+          gap,
+          laneOffset,
+        );
+        const nodeFrames = new Map<string, { x: number; y: number; width: number; height: number }>();
+        const memberElements = memberNodes.map((node) => {
+          const target = internalTargets.get(node.id) ?? { x: 0, y: 0 };
+          const frame = {
+            x: target.x,
+            y: target.y,
+            width: node.width,
+            height: node.height,
+          };
+          nodeFrames.set(node.id, frame);
+          return {
+            ...node.element,
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+          };
+        });
+        const rebuilt = buildWrappedTitledComposition({
+          title: String(entry.composition.titleElement.text ?? "Section"),
+          elements: memberElements,
+          shape: entry.composition.containerElement.roundness ? "rounded" : "rectangle",
+          backgroundColor: entry.composition.containerElement.backgroundColor,
+          strokeColor: entry.composition.containerElement.strokeColor,
+          textColor: entry.composition.titleElement.strokeColor,
+          dividerColor: entry.composition.dividerElement?.strokeColor,
+          opacity: entry.composition.containerElement.opacity,
+          padding: estimateCompositionPadding(entry.composition),
+          titleFontSize: Number(entry.composition.titleElement.fontSize ?? DEFAULT_COMPOSITION_TITLE_FONT_SIZE),
+          locked: Boolean(entry.composition.containerElement.locked ?? true),
+        });
+        clusterLayouts.push({
+          id: String(entry.composition.containerElement.id),
+          x: compositionFrame.x,
+          y: compositionFrame.y,
+          width: rebuilt.frame.width,
+          height: rebuilt.frame.height,
+          nodeFrames,
+          composition: {
+            original: entry.composition,
+            rebuilt,
+          },
+        });
+      }
+
+      for (const node of layoutNodes) {
+        if (claimedNodeIds.has(node.id)) continue;
+        clusterLayouts.push({
+          id: node.id,
+          x: Number(node.element?.x ?? 0),
+          y: Number(node.element?.y ?? 0),
+          width: node.width,
+          height: node.height,
+          nodeFrames: new Map([
+            [node.id, {
+              x: 0,
+              y: 0,
+              width: node.width,
+              height: node.height,
+            }],
+          ]),
+        });
+      }
+
+      const orderedClusters = [...clusterLayouts].sort((a, b) => {
+        if (mode === "vertical") {
+          return a.y - b.y || a.x - b.x;
+        }
+        return a.x - b.x || a.y - b.y;
+      });
+      const minX = Math.min(...orderedClusters.map((cluster) => cluster.x));
+      const minY = Math.min(...orderedClusters.map((cluster) => cluster.y));
+      const parsedStartX = Number(params.startX);
+      const parsedStartY = Number(params.startY);
+      const startX = Number.isFinite(parsedStartX) ? parsedStartX : minX;
+      const startY = Number.isFinite(parsedStartY) ? parsedStartY : minY;
+      const targetPositions = computeSequentialNodeTargets(
+        orderedClusters.map((cluster) => ({ id: cluster.id, width: cluster.width, height: cluster.height })),
+        mode,
+        startX,
+        startY,
+        gap,
+        laneOffset,
+      );
+      const targetFrames = new Map<string, { x: number; y: number; width: number; height: number }>();
+      const shiftedCompositions = new Map<string, { original: any; shifted: BuiltComposition }>();
+      for (const cluster of orderedClusters) {
+        const target = targetPositions.get(cluster.id);
+        if (!target) continue;
+        const anchorX = cluster.composition ? cluster.composition.rebuilt.frame.x : 0;
+        const anchorY = cluster.composition ? cluster.composition.rebuilt.frame.y : 0;
+        const deltaX = target.x - anchorX;
+        const deltaY = target.y - anchorY;
+        for (const [nodeId, frame] of cluster.nodeFrames.entries()) {
+          targetFrames.set(nodeId, {
+            x: frame.x + deltaX,
+            y: frame.y + deltaY,
+            width: frame.width,
+            height: frame.height,
+          });
+        }
+        if (cluster.composition) {
+          shiftedCompositions.set(String(cluster.composition.original.containerElement.id), {
+            original: cluster.composition.original,
+            shifted: translateBuiltComposition(cluster.composition.rebuilt, deltaX, deltaY),
+          });
+        }
+      }
       const updates: Array<{ id: string; updates: any }> = [];
       let resizedNodes = 0;
       for (const node of layoutNodes) {
@@ -2034,8 +2194,11 @@ export default function (pi: ExtensionAPI) {
           x: rawEnd.x - (vx / dist) * CONNECTOR_INSET,
           y: rawEnd.y - (vy / dist) * CONNECTOR_INSET,
         };
+        const connectorDx = finalEnd.x - finalStart.x;
+        const connectorDy = finalEnd.y - finalStart.y;
         const preferElbowed = Boolean(connector?.elbowed)
-          || (mode === "centered-flow" && Math.abs(finalEnd.y - finalStart.y) >= 24);
+          || (mode === "centered-flow" && Math.abs(connectorDy) >= 24)
+          || (Math.abs(connectorDx) >= 120 && Math.abs(connectorDy) >= 40);
         const connectorPath = buildConnectorPoints(finalStart, finalEnd, preferElbowed);
         updates.push({
           id: connector.id,
@@ -2049,61 +2212,32 @@ export default function (pi: ExtensionAPI) {
         movedConnectors++;
       }
       let adjustedCompositions = 0;
-      for (const entry of trackedCompositions) {
-        const { composition, memberNodeIds } = entry;
-        const memberElements = memberNodeIds.map((id: string) => {
-          const original = elementById.get(id);
-          const frame = targetFrames.get(id);
-          if (!original || !frame) return null;
-          return {
-            ...original,
-            x: frame.x,
-            y: frame.y,
-            width: frame.width,
-            height: frame.height,
-          };
-        }).filter(Boolean);
-        if (memberElements.length === 0 || !composition.containerElement || !composition.titleElement) continue;
-
-        const rebuilt = buildWrappedTitledComposition({
-          title: String(composition.titleElement.text ?? "Section"),
-          elements: memberElements,
-          shape: composition.containerElement.roundness ? "rounded" : "rectangle",
-          backgroundColor: composition.containerElement.backgroundColor,
-          strokeColor: composition.containerElement.strokeColor,
-          textColor: composition.titleElement.strokeColor,
-          dividerColor: composition.dividerElement?.strokeColor,
-          opacity: composition.containerElement.opacity,
-          padding: estimateCompositionPadding(composition),
-          titleFontSize: Number(composition.titleElement.fontSize ?? DEFAULT_COMPOSITION_TITLE_FONT_SIZE),
-          locked: Boolean(composition.containerElement.locked ?? true),
-        });
-
+      for (const { original, shifted } of shiftedCompositions.values()) {
         updates.push({
-          id: composition.containerElement.id,
+          id: original.containerElement.id,
           updates: {
-            x: rebuilt.containerElement.x,
-            y: rebuilt.containerElement.y,
-            width: rebuilt.containerElement.width,
-            height: rebuilt.containerElement.height,
+            x: shifted.containerElement.x,
+            y: shifted.containerElement.y,
+            width: shifted.containerElement.width,
+            height: shifted.containerElement.height,
           },
         });
         updates.push({
-          id: composition.titleElement.id,
+          id: original.titleElement.id,
           updates: {
-            x: rebuilt.titleElement.x,
-            y: rebuilt.titleElement.y,
-            width: rebuilt.titleElement.width,
-            height: rebuilt.titleElement.height,
+            x: shifted.titleElement.x,
+            y: shifted.titleElement.y,
+            width: shifted.titleElement.width,
+            height: shifted.titleElement.height,
           },
         });
-        if (composition.dividerElement?.id) {
+        if (original.dividerElement?.id) {
           updates.push({
-            id: composition.dividerElement.id,
+            id: original.dividerElement.id,
             updates: {
-              x: rebuilt.dividerElement.x,
-              y: rebuilt.dividerElement.y,
-              points: rebuilt.dividerElement.points,
+              x: shifted.dividerElement.x,
+              y: shifted.dividerElement.y,
+              points: shifted.dividerElement.points,
             },
           });
         }
@@ -2119,12 +2253,13 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `Applied ${mode} layout/polish to ${layoutNodes.length} node(s), softly resized ${resizedNodes}, re-centered ${movedLabels} grouped label(s), refreshed ${movedConnectors} connector(s), and re-fit ${adjustedCompositions} titled composition wrapper(s). Next: run excalidraw_focus_canvas, then excalidraw_capture_screenshot as the final visual quality check.`,
+          text: `Applied ${mode} layout/polish to ${layoutNodes.length} node(s) across ${orderedClusters.length} visual cluster(s), softly resized ${resizedNodes}, re-centered ${movedLabels} grouped label(s), refreshed ${movedConnectors} connector(s), and re-fit ${adjustedCompositions} titled composition wrapper(s). Next: run excalidraw_focus_canvas, then excalidraw_capture_screenshot as the final visual quality check.`,
         }],
         details: {
           mode,
           gap,
           laneOffset,
+          visualClusters: orderedClusters.length,
           movedNodes: layoutNodes.length,
           resizedNodes,
           movedLabels,
