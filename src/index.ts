@@ -477,21 +477,58 @@ const NODE_HORIZONTAL_PADDING = 24;
 const NODE_VERTICAL_PADDING = 18;
 const NODE_MIN_WIDTH = 120;
 const NODE_MIN_HEIGHT = 72;
+const NODE_AUTO_MIN_WIDTH = 160;
+const NODE_AUTO_MIN_HEIGHT = 92;
 const NODE_MAX_AUTO_WIDTH = 340;
+const NODE_MAX_AUTO_HEIGHT = 260;
+const NODE_RELATED_SIZE_BLEND = 0.45;
+const NODE_RELATED_SIZE_MAX_DELTA = 72;
+const NODE_RELATED_SIZE_OUTLIER_RATIO = 1.45;
+const NODE_MIN_HARMONIZE_DELTA = 10;
+const NODE_MIN_ADAPTIVE_GAP = 56;
+const NODE_MAX_ADAPTIVE_GAP = 320;
 const CONNECTOR_INSET = 10;
-
 type NodeShape = "rectangle" | "rounded" | "ellipse" | "diamond";
+type TextBoxMetrics = {
+  width: number;
+  height: number;
+  lines: string[];
+  longestLine: number;
+  longestWord: number;
+  compactLength: number;
+  lineHeight: number;
+  lineCount: number;
+};
+type BuiltNode = {
+  nodeElement: any;
+  labelElement: any;
+  nodeId: string;
+  labelId: string;
+  groupId: string;
+  meta: {
+    shape: NodeShape;
+    labelText: string;
+    fontSize: number;
+    textMetrics: TextBoxMetrics;
+    minWidth: number;
+    minHeight: number;
+    widthLocked: boolean;
+    heightLocked: boolean;
+  };
+};
 function makeLocalId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 function createElementsBatch(elements: any[]) {
   return callApi("POST", "/api/elements/batch", { elements });
 }
-
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function roundDimension(value: number) {
+  return Math.round(value / 2) * 2;
+}
 function normalizeLabelText(text: string): string {
   const normalized = String(text || "Node")
     .split("\n")
@@ -501,6 +538,24 @@ function normalizeLabelText(text: string): string {
   return normalized || "Node";
 }
 
+function getLabelTextStats(text: string) {
+  const normalized = normalizeLabelText(text);
+  const lines = normalized.split("\n");
+  const compactLength = normalized.replace(/\s+/g, "").length;
+  const longestLine = lines.reduce((max, line) => Math.max(max, line.length), 1);
+  const longestWord = normalized
+    .split(/\s+/)
+    .filter(Boolean)
+    .reduce((max, word) => Math.max(max, word.length), 1);
+  return {
+    normalized,
+    lines,
+    compactLength,
+    longestLine,
+    longestWord,
+    lineCount: lines.length,
+  };
+}
 function splitWordIntoChunks(word: string, maxCharsPerLine: number) {
   if (word.length <= maxCharsPerLine) return [word];
   const chunks: string[] = [];
@@ -510,19 +565,13 @@ function splitWordIntoChunks(word: string, maxCharsPerLine: number) {
   return chunks;
 }
 
-function estimateTextBox(text: string, maxWidth: number, fontSize: number): {
-  width: number;
-  height: number;
-  lines: string[];
-  longestLine: number;
-  lineHeight: number;
-} {
-  const normalized = normalizeLabelText(text);
-  const charWidth = Math.max(6, fontSize * 0.56);
+function estimateTextBox(text: string, maxWidth: number, fontSize: number): TextBoxMetrics {
+  const stats = getLabelTextStats(text);
+  const charWidth = Math.max(6, fontSize * 0.54);
   const lineHeight = Math.max(18, Math.round(fontSize * 1.35));
   const maxCharsPerLine = Math.max(8, Math.floor(maxWidth / charWidth));
   const lines: string[] = [];
-  for (const rawLine of normalized.split("\n")) {
+  for (const rawLine of stats.lines) {
     const words = rawLine
       .split(/\s+/)
       .filter(Boolean)
@@ -543,32 +592,133 @@ function estimateTextBox(text: string, maxWidth: number, fontSize: number): {
     }
     if (current) lines.push(current);
   }
-
   const longestLine = lines.reduce((max, line) => Math.max(max, line.length), 1);
-  const textWidth = Math.min(maxWidth, Math.max(56, Math.round(longestLine * charWidth + 10)));
+  const textWidth = Math.min(maxWidth, Math.max(56, Math.round(longestLine * charWidth + Math.min(22, fontSize))));
   const textHeight = Math.max(lineHeight, lines.length * lineHeight);
   return {
     width: textWidth,
     height: textHeight,
     lines,
     longestLine,
+    longestWord: stats.longestWord,
+    compactLength: stats.compactLength,
     lineHeight,
+    lineCount: lines.length,
   };
 }
-
 function chooseDefaultFontSize(labelText: string) {
-  const normalized = normalizeLabelText(labelText);
-  const longestLine = normalized.split("\n").reduce((max, line) => Math.max(max, line.length), 1);
-  const compactLength = normalized.replace(/\s+/g, "").length;
-
-  if (longestLine <= 12 && compactLength <= 24) return DEFAULT_NODE_FONT_SIZE;
-  if (longestLine <= 20 && compactLength <= 48) return 18;
-  return 16;
+  const stats = getLabelTextStats(labelText);
+  if (stats.lineCount >= 3 || stats.compactLength > 72 || stats.longestWord > 18) return 15;
+  if (stats.lineCount >= 2 || stats.compactLength > 44 || stats.longestLine > 20) return 16;
+  if (stats.compactLength > 26 || stats.longestLine > 12) return 18;
+  return DEFAULT_NODE_FONT_SIZE;
 }
-
 function normalizeNodeShape(shape: string | undefined): NodeShape {
   if (shape === "rounded" || shape === "ellipse" || shape === "diamond" || shape === "rectangle") return shape;
   return "rounded";
+}
+
+function getShapeContentPadding(shape: NodeShape) {
+  if (shape === "ellipse") {
+    return { horizontal: NODE_HORIZONTAL_PADDING + 10, vertical: NODE_VERTICAL_PADDING + 6 };
+  }
+  if (shape === "diamond") {
+    return { horizontal: NODE_HORIZONTAL_PADDING + 14, vertical: NODE_VERTICAL_PADDING + 10 };
+  }
+  return { horizontal: NODE_HORIZONTAL_PADDING, vertical: NODE_VERTICAL_PADDING };
+}
+
+function chooseAutoTextWidth(labelText: string, fontSize: number, shape: NodeShape) {
+  const stats = getLabelTextStats(labelText);
+  const charWidth = Math.max(6, fontSize * 0.54);
+  const { horizontal } = getShapeContentPadding(shape);
+  const maxTextWidth = Math.max(96, NODE_MAX_AUTO_WIDTH - horizontal * 2);
+  const preferredLines = stats.compactLength > 72 ? 4 : (stats.compactLength > 40 || stats.lineCount > 1 ? 3 : 2);
+  const longestWordWidth = stats.longestWord * charWidth + 14;
+  const longestLineWidth = stats.longestLine * charWidth * (stats.lineCount > 1 ? 0.96 : 0.88) + 18;
+  const densityWidth = (stats.compactLength / preferredLines) * charWidth + 18;
+  return clamp(
+    Math.round(Math.max(120, longestWordWidth, longestLineWidth, densityWidth)),
+    120,
+    maxTextWidth,
+  );
+}
+
+function measureNodeLabel(labelText: string, fontSize: number, shape: NodeShape, requestedTextWidth?: number) {
+  const { horizontal } = getShapeContentPadding(shape);
+  const maxTextWidth = Math.max(96, NODE_MAX_AUTO_WIDTH - horizontal * 2);
+  let targetTextWidth = clamp(
+    Math.round(requestedTextWidth ?? chooseAutoTextWidth(labelText, fontSize, shape)),
+    96,
+    maxTextWidth,
+  );
+  let textMetrics = estimateTextBox(labelText, targetTextWidth, fontSize);
+  if (requestedTextWidth === undefined && textMetrics.lineCount >= 4 && targetTextWidth < maxTextWidth) {
+    targetTextWidth = clamp(targetTextWidth + Math.min(72, (textMetrics.lineCount - 3) * 28), 96, maxTextWidth);
+    textMetrics = estimateTextBox(labelText, targetTextWidth, fontSize);
+  }
+  return textMetrics;
+}
+
+function computeNodeMinimumSize(shape: NodeShape, textMetrics: TextBoxMetrics) {
+  const padding = getShapeContentPadding(shape);
+  return {
+    minWidth: roundDimension(Math.max(NODE_MIN_WIDTH, textMetrics.width + padding.horizontal * 2)),
+    minHeight: roundDimension(Math.max(NODE_MIN_HEIGHT, textMetrics.height + padding.vertical * 2)),
+  };
+}
+
+function softlyHarmonizeDimension(current: number, target: number, min: number, locked: boolean) {
+  if (locked || !Number.isFinite(current) || !Number.isFinite(target)) return Math.max(min, current);
+  const safeCurrent = Math.max(min, current);
+  const ratio = target > safeCurrent ? target / safeCurrent : safeCurrent / target;
+  if (ratio > NODE_RELATED_SIZE_OUTLIER_RATIO) return safeCurrent;
+  const delta = target - safeCurrent;
+  if (Math.abs(delta) < NODE_MIN_HARMONIZE_DELTA) return safeCurrent;
+  const boundedTarget = clamp(target, safeCurrent - NODE_RELATED_SIZE_MAX_DELTA, safeCurrent + NODE_RELATED_SIZE_MAX_DELTA);
+  return roundDimension(Math.max(min, safeCurrent + (boundedTarget - safeCurrent) * NODE_RELATED_SIZE_BLEND));
+}
+
+function median(values: number[]) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
+}
+
+function chooseHarmonizedTarget(values: number[]) {
+  if (values.length === 0) return 0;
+  const baseline = median(values);
+  const filtered = values.filter((value) => {
+    const ratio = value > baseline ? value / baseline : baseline / value;
+    return ratio <= NODE_RELATED_SIZE_OUTLIER_RATIO;
+  });
+  return median(filtered.length >= 2 ? filtered : values);
+}
+
+function harmonizeNodeDimensions(nodes: Array<{
+  width: number;
+  height: number;
+  minWidth: number;
+  minHeight: number;
+  widthLocked?: boolean;
+  heightLocked?: boolean;
+}>) {
+  if (nodes.length < 2) return;
+  const widthTarget = chooseHarmonizedTarget(nodes.map((node) => node.width));
+  const heightTarget = chooseHarmonizedTarget(nodes.map((node) => node.height));
+  for (const node of nodes) {
+    node.width = softlyHarmonizeDimension(node.width, widthTarget, node.minWidth, Boolean(node.widthLocked));
+    node.height = softlyHarmonizeDimension(node.height, heightTarget, node.minHeight, Boolean(node.heightLocked));
+  }
+}
+
+function resolveAdaptiveGap(requestedGap: number, previousSpan: number, nextSpan: number, baselineSpan: number) {
+  const averageSpan = (previousSpan + nextSpan) / 2;
+  const scaledGap = requestedGap + (averageSpan - baselineSpan) * 0.35;
+  const minGap = Math.max(40, Math.min(requestedGap, NODE_MIN_ADAPTIVE_GAP));
+  const maxGap = Math.max(requestedGap + 96, NODE_MAX_ADAPTIVE_GAP);
+  return clamp(Math.round(scaledGap), minGap, maxGap);
 }
 function buildNodeElements(input: {
   id?: string;
@@ -583,42 +733,31 @@ function buildNodeElements(input: {
   textColor?: string;
   fillStyle?: string;
   fontSize?: number;
-}) {
+}): BuiltNode {
   const nodeId = input.id || makeLocalId("node");
   const labelId = makeLocalId("label");
   const groupId = makeLocalId("group");
   const shape = normalizeNodeShape(input.shape);
   const labelText = normalizeLabelText(input.label);
-
   const requestedWidth = Number(input.width);
   const requestedHeight = Number(input.height);
   const requestedFontSize = Number(input.fontSize);
   const hasWidth = Number.isFinite(requestedWidth);
   const hasHeight = Number.isFinite(requestedHeight);
   const hasFontSize = Number.isFinite(requestedFontSize);
-
   const fontSize = Math.round(Math.max(14, hasFontSize ? requestedFontSize : chooseDefaultFontSize(labelText)));
-  const targetTextWidth = hasWidth
-    ? Math.max(96, requestedWidth - NODE_HORIZONTAL_PADDING * 2)
-    : clamp(160 + labelText.length * 3, 160, NODE_MAX_AUTO_WIDTH - NODE_HORIZONTAL_PADDING * 2);
-  const textMetrics = estimateTextBox(labelText, targetTextWidth, fontSize);
+  const requestedTextWidth = hasWidth
+    ? Math.max(96, requestedWidth - getShapeContentPadding(shape).horizontal * 2)
+    : undefined;
+  const textMetrics = measureNodeLabel(labelText, fontSize, shape, requestedTextWidth);
+  const { minWidth, minHeight } = computeNodeMinimumSize(shape, textMetrics);
 
-  let width = hasWidth
-    ? Math.max(NODE_MIN_WIDTH, requestedWidth, textMetrics.width + NODE_HORIZONTAL_PADDING * 2)
-    : clamp(textMetrics.width + NODE_HORIZONTAL_PADDING * 2, 160, NODE_MAX_AUTO_WIDTH);
-  let height = hasHeight
-    ? Math.max(NODE_MIN_HEIGHT, requestedHeight, textMetrics.height + NODE_VERTICAL_PADDING * 2)
-    : clamp(textMetrics.height + NODE_VERTICAL_PADDING * 2, 92, 240);
-
-  if (shape === "ellipse") {
-    width = Math.max(width, textMetrics.width + NODE_HORIZONTAL_PADDING * 2 + 20);
-    height = Math.max(height, textMetrics.height + NODE_VERTICAL_PADDING * 2 + 12);
-  }
-
-  if (shape === "diamond") {
-    width = Math.max(width, textMetrics.width + NODE_HORIZONTAL_PADDING * 2 + 28);
-    height = Math.max(height, textMetrics.height + NODE_VERTICAL_PADDING * 2 + 20);
-  }
+  const width = roundDimension(hasWidth
+    ? Math.max(minWidth, requestedWidth)
+    : clamp(minWidth, NODE_AUTO_MIN_WIDTH, NODE_MAX_AUTO_WIDTH));
+  const height = roundDimension(hasHeight
+    ? Math.max(minHeight, requestedHeight)
+    : clamp(minHeight, NODE_AUTO_MIN_HEIGHT, NODE_MAX_AUTO_HEIGHT));
   const nodeType = shape === "rounded" ? "rectangle" : shape;
   const nodeElement: any = {
     id: nodeId,
@@ -656,19 +795,46 @@ function buildNodeElements(input: {
     nodeId,
     labelId,
     groupId,
+    meta: {
+      shape,
+      labelText,
+      fontSize,
+      textMetrics,
+      minWidth,
+      minHeight,
+      widthLocked: hasWidth,
+      heightLocked: hasHeight,
+    },
   };
 }
 
-function translateBuiltNode(node: { nodeElement: any; labelElement: any }, x: number, y: number) {
-  const deltaX = x - Number(node.nodeElement?.x ?? 0);
-  const deltaY = y - Number(node.nodeElement?.y ?? 0);
-  node.nodeElement.x = x;
-  node.nodeElement.y = y;
-  node.labelElement.x = Number(node.labelElement?.x ?? 0) + deltaX;
-  node.labelElement.y = Number(node.labelElement?.y ?? 0) + deltaY;
-  return node;
+function harmonizeBuiltNodes(nodes: BuiltNode[]) {
+  const dimensions = nodes.map((node) => ({
+    width: Number(node.nodeElement.width ?? DEFAULT_NODE_WIDTH),
+    height: Number(node.nodeElement.height ?? DEFAULT_NODE_HEIGHT),
+    minWidth: node.meta.minWidth,
+    minHeight: node.meta.minHeight,
+    widthLocked: node.meta.widthLocked,
+    heightLocked: node.meta.heightLocked,
+  }));
+  harmonizeNodeDimensions(dimensions);
+
+  nodes.forEach((node, index) => {
+    const next = dimensions[index];
+    node.nodeElement.width = next.width;
+    node.nodeElement.height = next.height;
+    node.labelElement.x = Number(node.nodeElement.x ?? 0) + (next.width - Number(node.labelElement.width ?? 0)) / 2;
+    node.labelElement.y = Number(node.nodeElement.y ?? 0) + (next.height - Number(node.labelElement.height ?? 0)) / 2;
+  });
 }
 
+function translateBuiltNode(node: BuiltNode, x: number, y: number) {
+  node.nodeElement.x = x;
+  node.nodeElement.y = y;
+  node.labelElement.x = x + (Number(node.nodeElement.width ?? 0) - Number(node.labelElement.width ?? 0)) / 2;
+  node.labelElement.y = y + (Number(node.nodeElement.height ?? 0) - Number(node.labelElement.height ?? 0)) / 2;
+  return node;
+}
 function computeSequentialNodeTargets(
   nodes: Array<{ id: string; width?: number; height?: number }>,
   mode: "horizontal" | "vertical" | "centered-flow",
@@ -678,6 +844,7 @@ function computeSequentialNodeTargets(
   laneOffset: number,
 ) {
   const targetPositions = new Map<string, { x: number; y: number }>();
+  if (nodes.length === 0) return targetPositions;
   const maxWidth = Math.max(...nodes.map((node) => Number(node.width ?? DEFAULT_NODE_WIDTH)));
   const maxHeight = Math.max(...nodes.map((node) => Number(node.height ?? DEFAULT_NODE_HEIGHT)));
   let cursorX = startX;
@@ -688,25 +855,29 @@ function computeSequentialNodeTargets(
     const height = Number(node.height ?? DEFAULT_NODE_HEIGHT);
     let x = startX;
     let y = startY;
-
+    if (index > 0) {
+      const previous = nodes[index - 1];
+      const previousWidth = Number(previous?.width ?? DEFAULT_NODE_WIDTH);
+      const previousHeight = Number(previous?.height ?? DEFAULT_NODE_HEIGHT);
+      if (mode === "vertical") {
+        cursorY += previousHeight + resolveAdaptiveGap(gap, previousHeight, height, DEFAULT_NODE_HEIGHT);
+      } else {
+        cursorX += previousWidth + resolveAdaptiveGap(gap, previousWidth, width, DEFAULT_NODE_WIDTH);
+      }
+    }
     if (mode === "vertical") {
       x = startX + (maxWidth - width) / 2;
       y = cursorY;
-      cursorY += height + gap;
     } else if (mode === "centered-flow") {
       const laneDirection = index === 0 ? 0 : (index % 2 === 0 ? 1 : -1);
       x = cursorX;
       y = startY + (maxHeight - height) / 2 + laneDirection * laneOffset;
-      cursorX += width + gap;
     } else {
       x = cursorX;
       y = startY + (maxHeight - height) / 2;
-      cursorX += width + gap;
     }
-
     targetPositions.set(node.id, { x, y });
   });
-
   return targetPositions;
 }
 
@@ -735,17 +906,22 @@ function buildConnectorPoints(start: { x: number; y: number }, end: { x: number;
     elbowed: true,
   };
 }
-function computeCenter(element: any, target?: { x: number; y: number }) {
+function computeCenter(element: any, target?: { x: number; y: number; width?: number; height?: number }) {
   const x = target?.x ?? Number(element?.x ?? 0);
   const y = target?.y ?? Number(element?.y ?? 0);
-  const width = Number(element?.width ?? 0);
-  const height = Number(element?.height ?? 0);
+  const width = target?.width ?? Number(element?.width ?? 0);
+  const height = target?.height ?? Number(element?.height ?? 0);
   return { x: x + width / 2, y: y + height / 2 };
 }
-function computeEdgePoint(element: any, targetCenterX: number, targetCenterY: number, target?: { x: number; y: number }) {
+function computeEdgePoint(
+  element: any,
+  targetCenterX: number,
+  targetCenterY: number,
+  target?: { x: number; y: number; width?: number; height?: number },
+) {
   const { x: cx, y: cy } = computeCenter(element, target);
-  const width = Number(element?.width ?? 0);
-  const height = Number(element?.height ?? 0);
+  const width = target?.width ?? Number(element?.width ?? 0);
+  const height = target?.height ?? Number(element?.height ?? 0);
   const dx = targetCenterX - cx;
   const dy = targetCenterY - cy;
   if (dx === 0 && dy === 0) return { x: cx, y: cy };
@@ -954,7 +1130,7 @@ export default function (pi: ExtensionAPI) {
       const elementBatch: any[] = [];
       const nodeIds: string[] = [];
       const connectorIds: string[] = [];
-      const builtNodes = nodes.map((nodeInput: any) => buildNodeElements({
+      const builtNodes: BuiltNode[] = nodes.map((nodeInput: any) => buildNodeElements({
         label: nodeInput.label,
         x: 0,
         y: 0,
@@ -966,12 +1142,12 @@ export default function (pi: ExtensionAPI) {
         textColor: params.textColor,
         fontSize: params.fontSize,
       }));
-
+      harmonizeBuiltNodes(builtNodes);
       const autoTargets = computeSequentialNodeTargets(
-        builtNodes.map((node: ReturnType<typeof buildNodeElements>) => ({
+        builtNodes.map((node: BuiltNode) => ({
           id: node.nodeId,
-          width: node.nodeElement.width,
-          height: node.nodeElement.height,
+          width: Number(node.nodeElement.width ?? DEFAULT_NODE_WIDTH),
+          height: Number(node.nodeElement.height ?? DEFAULT_NODE_HEIGHT),
         })),
         direction === "vertical" ? "vertical" : "horizontal",
         startX,
@@ -980,7 +1156,7 @@ export default function (pi: ExtensionAPI) {
         0,
       );
 
-      builtNodes.forEach((node: ReturnType<typeof buildNodeElements>, index: number) => {
+      builtNodes.forEach((node: BuiltNode, index: number) => {
         const nodeInput = nodes[index] ?? {};
         const autoTarget = autoTargets.get(node.nodeId) ?? { x: startX, y: startY };
         const targetX = Number.isFinite(Number(nodeInput.x)) ? Number(nodeInput.x) : autoTarget.x;
@@ -989,7 +1165,6 @@ export default function (pi: ExtensionAPI) {
         nodeIds.push(node.nodeId);
         elementBatch.push(node.nodeElement, node.labelElement);
       });
-
       for (let i = 0; i < builtNodes.length - 1; i++) {
         const startNode = builtNodes[i].nodeElement;
         const endNode = builtNodes[i + 1].nodeElement;
@@ -1030,7 +1205,7 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `Created ${nodeIds.length} connected node(s) and ${connectorIds.length} connector arrow(s) with cleaner default sizing and spacing. Next: run excalidraw_layout_diagram to polish the composition further, then excalidraw_focus_canvas and excalidraw_capture_screenshot.`,
+          text: `Created ${nodeIds.length} connected node(s) and ${connectorIds.length} connector arrow(s) with softer related-node sizing and more adaptive spacing. Next: run excalidraw_layout_diagram to polish the composition further, then excalidraw_focus_canvas and excalidraw_capture_screenshot.`,
         }],
         details: {
           ...result,
@@ -1081,71 +1256,108 @@ export default function (pi: ExtensionAPI) {
         }
         return Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0);
       });
-      const minX = Math.min(...nodes.map((n: any) => Number(n?.x ?? 0)));
-      const minY = Math.min(...nodes.map((n: any) => Number(n?.y ?? 0)));
+      const elementById = new Map<string, any>();
+      const textByGroupId = new Map<string, any>();
+      for (const element of allElements) {
+        if (typeof element?.id === "string") {
+          elementById.set(element.id, element);
+        }
+        if (element?.type === "text") {
+          const groupIds = Array.isArray(element.groupIds) ? element.groupIds : [];
+          for (const groupId of groupIds) {
+            if (!textByGroupId.has(groupId)) {
+              textByGroupId.set(groupId, element);
+            }
+          }
+        }
+      }
+
+      const layoutNodes: Array<{ id: string; element: any; labelElement: any; width: number; height: number; minWidth: number; minHeight: number; }> = nodes.map((node: any) => {
+        const groupIds = Array.isArray(node.groupIds) ? node.groupIds : [];
+        const labelElement = groupIds.map((groupId: string) => textByGroupId.get(groupId)).find(Boolean);
+        const shape = normalizeNodeShape(
+          node?.type === "rectangle" && node?.roundness ? "rounded" : String(node?.type ?? "rectangle"),
+        );
+        const padding = getShapeContentPadding(shape);
+        const currentWidth = Number(node?.width ?? DEFAULT_NODE_WIDTH);
+        const currentHeight = Number(node?.height ?? DEFAULT_NODE_HEIGHT);
+        const labelWidth = Number(labelElement?.width ?? 0);
+        const labelHeight = Number(labelElement?.height ?? 0);
+        return {
+          id: String(node.id),
+          element: node,
+          labelElement,
+          width: currentWidth,
+          height: currentHeight,
+          minWidth: labelElement
+            ? roundDimension(Math.max(NODE_MIN_WIDTH, labelWidth + padding.horizontal * 2))
+            : currentWidth,
+          minHeight: labelElement
+            ? roundDimension(Math.max(NODE_MIN_HEIGHT, labelHeight + padding.vertical * 2))
+            : currentHeight,
+        };
+      });
+      harmonizeNodeDimensions(layoutNodes);
+
+      const minX = Math.min(...layoutNodes.map((node: { element: any }) => Number(node.element?.x ?? 0)));
+      const minY = Math.min(...layoutNodes.map((node: { element: any }) => Number(node.element?.y ?? 0)));
       const parsedStartX = Number(params.startX);
       const parsedStartY = Number(params.startY);
       const startX = Number.isFinite(parsedStartX) ? parsedStartX : minX;
       const startY = Number.isFinite(parsedStartY) ? parsedStartY : minY;
       const targetPositions = computeSequentialNodeTargets(
-        nodes.map((node: any) => ({
-          id: String(node.id),
-          width: Number(node?.width ?? DEFAULT_NODE_WIDTH),
-          height: Number(node?.height ?? DEFAULT_NODE_HEIGHT),
-        })),
+        layoutNodes.map((node: { id: string; width: number; height: number }) => ({ id: node.id, width: node.width, height: node.height })),
         mode,
         startX,
         startY,
         gap,
         laneOffset,
       );
-      const nodeDeltas = new Map<string, { dx: number; dy: number }>();
-      nodes.forEach((node: any) => {
-        const target = targetPositions.get(String(node.id));
-        if (!target) return;
-        nodeDeltas.set(String(node.id), {
-          dx: target.x - Number(node?.x ?? 0),
-          dy: target.y - Number(node?.y ?? 0),
-        });
-      });
-      const updates: Array<{ id: string; updates: any }> = [];
-      for (const node of nodes) {
-        const target = targetPositions.get(String(node.id));
+      const targetFrames = new Map<string, { x: number; y: number; width: number; height: number }>();
+      for (const node of layoutNodes) {
+        const target = targetPositions.get(node.id);
         if (!target) continue;
-        updates.push({ id: String(node.id), updates: { x: target.x, y: target.y } });
+        targetFrames.set(node.id, {
+          x: target.x,
+          y: target.y,
+          width: node.width,
+          height: node.height,
+        });
       }
-      const groupDeltas = new Map<string, { dx: number; dy: number }>();
-      for (const node of nodes) {
-        const delta = nodeDeltas.get(String(node.id));
-        if (!delta) continue;
-        const groupIds = Array.isArray(node.groupIds) ? node.groupIds : [];
-        for (const groupId of groupIds) {
-          if (!groupDeltas.has(groupId)) {
-            groupDeltas.set(groupId, delta);
-          }
+      const updates: Array<{ id: string; updates: any }> = [];
+      let resizedNodes = 0;
+      for (const node of layoutNodes) {
+        const frame = targetFrames.get(node.id);
+        if (!frame) continue;
+        if (
+          frame.width !== Number(node.element?.width ?? 0)
+          || frame.height !== Number(node.element?.height ?? 0)
+        ) {
+          resizedNodes++;
         }
+        updates.push({
+          id: node.id,
+          updates: {
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+          },
+        });
       }
       let movedLabels = 0;
-      for (const element of allElements) {
-        if (element?.type !== "text" || typeof element?.id !== "string") continue;
-        const groupIds = Array.isArray(element.groupIds) ? element.groupIds : [];
-        const delta = groupIds.map((groupId: string) => groupDeltas.get(groupId)).find(Boolean);
-        if (!delta) continue;
-
+      for (const node of layoutNodes) {
+        const frame = targetFrames.get(node.id);
+        const labelElement = node.labelElement;
+        if (!frame || !labelElement || typeof labelElement?.id !== "string") continue;
         updates.push({
-          id: element.id,
+          id: labelElement.id,
           updates: {
-            x: Number(element?.x ?? 0) + delta.dx,
-            y: Number(element?.y ?? 0) + delta.dy,
+            x: frame.x + (frame.width - Number(labelElement?.width ?? 0)) / 2,
+            y: frame.y + (frame.height - Number(labelElement?.height ?? 0)) / 2,
           },
         });
         movedLabels++;
-      }
-      const elementById = new Map<string, any>();
-      for (const element of allElements) {
-        if (typeof element?.id === "string") {
-          elementById.set(element.id, element);
-        }
       }
       let movedConnectors = 0;
       for (const connector of allElements) {
@@ -1156,8 +1368,8 @@ export default function (pi: ExtensionAPI) {
         const startElement = elementById.get(startId);
         const endElement = elementById.get(endId);
         if (!startElement || !endElement) continue;
-        const startTarget = targetPositions.get(startId);
-        const endTarget = targetPositions.get(endId);
+        const startTarget = targetFrames.get(startId);
+        const endTarget = targetFrames.get(endId);
         if (!startTarget && !endTarget) continue;
         const startCenter = computeCenter(startElement, startTarget);
         const endCenter = computeCenter(endElement, endTarget);
@@ -1198,13 +1410,14 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `Applied ${mode} layout/polish to ${nodes.length} node(s), moved ${movedLabels} grouped label(s), and refreshed ${movedConnectors} connector(s). Next: run excalidraw_focus_canvas, then excalidraw_capture_screenshot as the final visual quality check.`,
+          text: `Applied ${mode} layout/polish to ${layoutNodes.length} node(s), softly resized ${resizedNodes}, re-centered ${movedLabels} grouped label(s), and refreshed ${movedConnectors} connector(s). Next: run excalidraw_focus_canvas, then excalidraw_capture_screenshot as the final visual quality check.`,
         }],
         details: {
           mode,
           gap,
           laneOffset,
-          movedNodes: nodes.length,
+          movedNodes: layoutNodes.length,
+          resizedNodes,
           movedLabels,
           movedConnectors,
           updatedIds: Array.from(latestById.keys()),
