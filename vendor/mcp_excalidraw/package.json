@@ -1,0 +1,94 @@
+{
+  "name": "pi-excalidraw-vendored-runtime",
+  "version": "1.0.2",
+  "private": true,
+  "description": "Vendored Excalidraw canvas runtime assets for the pi-excalidraw package",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "mcp-excalidraw-server": "dist/index.js"
+  },
+  "scripts": {
+    "start": "npm run build:server && node dist/index.js",
+    "canvas": "npm run build:server && node dist/server.js",
+    "build": "npm run build:frontend && npm run build:server",
+    "build:frontend": "vite build",
+    "build:server": "npx tsc",
+    "build:types": "npx tsc --emitDeclarationOnly",
+    "dev": "concurrently \"npm run dev:server\" \"vite\"",
+    "dev:server": "npx tsc --watch",
+    "production": "npm run build && npm run canvas",
+    "prepublishOnly": "npm run build",
+    "type-check": "npx tsc --noEmit"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.0",
+    "@excalidraw/mermaid-to-excalidraw": "^1.1.3",
+    "@modelcontextprotocol/sdk": "latest",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "mermaid": "^11.12.1",
+    "node-fetch": "^3.3.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "winston": "^3.11.0",
+    "ws": "^8.14.2",
+    "zod": "^3.22.4",
+    "zod-to-json-schema": "^3.22.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.19.7",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.5.10",
+    "@vitejs/plugin-react": "^4.6.0",
+    "concurrently": "^9.2.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "excalidraw",
+    "model-context-protocol",
+    "ai",
+    "drawing",
+    "diagrams",
+    "canvas",
+    "real-time",
+    "websocket",
+    "visualization",
+    "claude",
+    "ai-tools"
+  ],
+  "author": {
+    "name": "yctimlin",
+    "email": "c22647809@gmail.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yctimlin/mcp_excalidraw.git"
+  },
+  "homepage": "https://github.com/yctimlin/mcp_excalidraw#readme",
+  "bugs": {
+    "url": "https://github.com/yctimlin/mcp_excalidraw/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "src/**/*",
+    "dist/**/*",
+    "*.d.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

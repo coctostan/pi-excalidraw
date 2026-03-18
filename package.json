@@ -1,0 +1,60 @@
+{
+  "name": "pi-excalidraw",
+  "version": "0.4.0",
+  "description": "A pi package that provides a locally hosted Excalidraw canvas plus AI-callable diagramming tools.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coctostan/pi-excalidraw.git"
+  },
+  "homepage": "https://github.com/coctostan/pi-excalidraw#readme",
+  "bugs": {
+    "url": "https://github.com/coctostan/pi-excalidraw/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "excalidraw",
+    "diagramming"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "files": [
+    "src/",
+    "vendor/",
+    "scripts/",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke-test": "node --import=tsx ./scripts/smoke-test.mjs",
+    "check": "npm run typecheck && npm run smoke-test && npm pack --dry-run >/dev/null"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "winston": "^3.11.0",
+    "ws": "^8.14.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.52.8",
+    "@sinclair/typebox": "^0.34.48",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+*.tgz
+.DS_Store
+
+# local pi state
+.pi/settings.json
+.pi/excalidraw-diagrams/
+.pi/excalidraw-templates/
+
+# keep the project-local development shim checked in
+!.pi/extensions/
+!.pi/extensions/pi-excalidraw/

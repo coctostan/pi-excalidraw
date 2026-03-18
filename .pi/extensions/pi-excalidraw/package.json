@@ -1,0 +1,6 @@
+{
+  "name": "pi-excalidraw-dev-shim",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts"
+}
