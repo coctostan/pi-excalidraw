@@ -1,6 +1,6 @@
 {
   "name": "pi-excalidraw",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A pi package that provides a locally hosted Excalidraw canvas plus AI-callable diagramming tools.",
   "repository": {
     "type": "git",
