@@ -1507,6 +1507,72 @@ function collectCompositionStructures(elements: any[]): Array<{
   } => Boolean(entry.containerElement));
 }
 
+// ─── Mermaid-to-Excalidraw conversion ──────────────────────────────────────
+
+/**
+ * Convert a Mermaid diagram definition into Excalidraw elements by delegating
+ * to the browser-side canvas (which has full DOM and the bundled
+ * @excalidraw/mermaid-to-excalidraw library).
+ *
+ * Flow:
+ *   1. Snapshot current element IDs on the canvas.
+ *   2. POST the mermaid definition to the vendor's /api/elements/from-mermaid endpoint.
+ *   3. The browser converts the mermaid syntax and adds new elements to the canvas.
+ *   4. Poll until new elements appear (or timeout).
+ *   5. Return the newly added elements.
+ *
+ * Throws on invalid mermaid syntax or if the browser fails to convert.
+ */
+async function convertMermaidToElements(
+  definition: string,
+  options?: { config?: Record<string, unknown>; timeoutMs?: number; pollIntervalMs?: number }
+): Promise<{ elements: any[]; elementIds: string[] }> {
+  if (!definition || typeof definition !== "string" || !definition.trim()) {
+    throw new Error("Mermaid definition must be a non-empty string.");
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 10_000;
+  const pollIntervalMs = options?.pollIntervalMs ?? 300;
+
+  // 1. Snapshot current element IDs
+  const beforeData = await callApi("GET", "/api/elements");
+  const beforeIds = new Set<string>(
+    (Array.isArray(beforeData?.elements) ? beforeData.elements : []).map((el: any) => el.id)
+  );
+
+  // 2. Send mermaid diagram to the browser for conversion
+  const sendResult = await callApi("POST", "/api/elements/from-mermaid", {
+    mermaidDiagram: definition,
+    config: options?.config ?? {},
+  });
+  if (!sendResult?.success) {
+    throw new Error(sendResult?.error || "Failed to send mermaid diagram to the canvas.");
+  }
+
+  // 3. Poll for new elements (the browser converts asynchronously)
+  const deadline = Date.now() + timeoutMs;
+  let newElements: any[] = [];
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    const afterData = await callApi("GET", "/api/elements");
+    const allElements: any[] = Array.isArray(afterData?.elements) ? afterData.elements : [];
+    newElements = allElements.filter((el: any) => !beforeIds.has(el.id));
+    if (newElements.length > 0) break;
+  }
+
+  if (newElements.length === 0) {
+    throw new Error(
+      "Mermaid conversion produced no new elements. The diagram may be invalid, unsupported, or the browser canvas is not connected."
+    );
+  }
+
+  return {
+    elements: newElements,
+    elementIds: newElements.map((el: any) => el.id),
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("excalidraw", {
     description: "Start local Excalidraw canvas and show URL",
