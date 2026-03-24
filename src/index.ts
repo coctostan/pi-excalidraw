@@ -2501,7 +2501,7 @@ export default function (pi: ExtensionAPI) {
     description: "Low-level primitive: patch a specific element by id when high-level tools are not enough.",
     parameters: Type.Object({
       id: Type.String(),
-      updates: Type.Any({ description: "Partial element fields to update" }),
+      updates: Type.Record(Type.String(), Type.Any(), { description: "Partial element fields to update" }),
     }),
     async execute(_id, params: any) {
       const result = await callApi("PUT", `/api/elements/${encodeURIComponent(params.id)}`, params.updates ?? {});
