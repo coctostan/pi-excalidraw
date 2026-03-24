@@ -2635,6 +2635,48 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "excalidraw_mermaid_to_excalidraw",
+    label: "Mermaid to Excalidraw",
+    description:
+      "Convert Mermaid diagram syntax into native Excalidraw elements on the canvas. " +
+      "Supported diagram types: flowchart, sequence, class, and ER (rendered as native shapes/arrows). " +
+      "Unsupported types (gantt, gitgraph, etc.) are rendered as images. " +
+      "Requires a connected browser canvas.",
+    parameters: Type.Object({
+      definition: Type.String({ description: "Mermaid diagram syntax (e.g. 'flowchart TD\\n  A[Start] --> B[End]')" }),
+    }),
+    async execute(_id, params: any) {
+      try {
+        const result = await convertMermaidToElements(params.definition);
+        const count = result.elements.length;
+        const types = new Map<string, number>();
+        for (const el of result.elements) {
+          const t = el.type ?? "unknown";
+          types.set(t, (types.get(t) ?? 0) + 1);
+        }
+        const breakdown = Array.from(types.entries())
+          .map(([t, n]) => `${n} ${t}${n > 1 ? "s" : ""}`)
+          .join(", ");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Converted Mermaid diagram to ${count} Excalidraw element(s) (${breakdown}). Use excalidraw_focus_canvas + excalidraw_capture_screenshot to visually verify.`,
+            },
+          ],
+          details: { elementCount: count, elementIds: result.elementIds, breakdown: Object.fromEntries(types) },
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text", text: `Mermaid conversion failed: ${err?.message ?? String(err)}` }],
+          isError: true,
+          details: undefined,
+        };
+      }
+    },
+  });
+
   pi.on("session_shutdown", async () => {
     await stopCanvas();
   });
