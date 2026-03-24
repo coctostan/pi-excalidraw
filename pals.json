@@ -1,6 +1,6 @@
 {
   "modules": {
-    "carl": { "enabled": true, "description": "Context rules & domain configuration" },
+    "carl": { "enabled": true, "description": "Session boundary manager (Pi extension)", "session_strategy": "phase-boundary", "continue_threshold": 0.4, "safety_ceiling": 0.8 },
     "todd": { "enabled": true, "description": "Test-driven development enforcement" },
     "walt": { "enabled": true, "description": "Quality gating & validation" },
     "dean": { "enabled": true, "description": "Dependency evaluation & audit notifier" },
@@ -10,15 +10,25 @@
     "ruby": { "enabled": true, "description": "Refactor utility & better-code yielder" }
   },
   "git": {
-    "remote": null,
+    "workflow": "github-flow",
+    "remote": "https://github.com/coctostan/pi-excalidraw.git",
+    "base_branch": "main",
+    "merge_method": "squash",
     "branching": "feature-per-phase",
     "worktree_isolation": false,
-    "auto_push": false,
-    "auto_pr": false,
-    "ci_checks": false
+    "auto_push": true,
+    "auto_pr": true,
+    "ci_checks": true,
+    "delete_branch_on_merge": true,
+    "update_branch_when_behind": true,
+    "require_pr_before_next_phase": true,
+    "require_reviews": false
   },
   "integrations": {
     "sonarqube": { "enabled": false, "project_key": "" }
+  },
+  "planning": {
+    "default_collaboration": "medium"
   },
   "preferences": {
     "auto_commit": false,
