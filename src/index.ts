@@ -92,7 +92,7 @@ async function ensureCanvasRunning(ctx?: { ui?: { notify: (msg: string, level: "
     }
 
     const port = await findAvailablePort(BASE_PORT);
-    const proc = spawn(process.execPath, [serverPath], {
+    const proc = spawn("node", [serverPath], {
       cwd,
       env: {
         ...process.env,
@@ -102,19 +102,37 @@ async function ensureCanvasRunning(ctx?: { ui?: { notify: (msg: string, level: "
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    proc.stdout?.on("data", () => {});
-    proc.stderr?.on("data", () => {});
-
-    proc.on("exit", () => {
+    let startupOutput = "";
+    const appendOutput = (source: string, chunk: Buffer) => {
+      startupOutput = `${startupOutput}${source}: ${chunk.toString()}`.slice(-8000);
+    };
+    proc.stdout?.on("data", (chunk: Buffer) => appendOutput("stdout", chunk));
+    proc.stderr?.on("data", (chunk: Buffer) => appendOutput("stderr", chunk));
+    proc.on("error", (error) => {
+      appendOutput("error", Buffer.from(error.message));
       state.process = null;
       state.port = null;
+    });
+
+    proc.on("exit", (code, signal) => {
+      state.process = null;
+      state.port = null;
+      if (code !== 0) {
+        startupOutput = `${startupOutput}\nprocess exited: code=${code}, signal=${signal}`.slice(-8000);
+      }
     });
 
     state.process = proc;
     state.port = port;
 
-    const url = `http://localhost:${port}`;
-    await waitForHealth(url);
+    const url = `http://${HOST}:${port}`;
+    try {
+      await waitForHealth(url);
+    } catch (error) {
+      const details = startupOutput.trim();
+      await stopCanvas();
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${details ? `\nServer output:\n${details}` : "\nServer exited without producing output."}`);
+    }
 
     ctx?.ui?.notify(`Excalidraw canvas running at ${url}`, "success");
     return url;
